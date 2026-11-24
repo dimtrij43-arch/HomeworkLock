@@ -171,7 +171,7 @@ fun MainScreen(vm: VM, onArchive: () -> Unit, onSettings: () -> Unit) {
         }
     }
     Box(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp), contentAlignment = Alignment.BottomEnd) {
-        ExtendedFloatingActionButton({ adding = true }, icon = { Icon(Icons.Default.Add, null) }, text = { Text("Добавить ДЗ") })
+        ExtendedFloatingActionButton(onClick = { adding = true }, icon = { Icon(Icons.Default.Add, null) }, text = { Text("Добавить ДЗ") })
     }
     if (adding) TaskDialog(null, { adding = false }) { a, b, c -> vm.saveTask(0, a, b, c) }
     dialog?.let { d -> TaskDialog(d, { dialog = null }) { a, b, c -> vm.saveTask(d.id, a, b, c) } }
