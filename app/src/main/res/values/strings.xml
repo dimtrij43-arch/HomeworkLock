@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Homework Lock</string>
+    <string name="a11y_desc">Перехватывает запуск заблокированных приложений и защищает от обхода блокировки.</string>
+</resources>
