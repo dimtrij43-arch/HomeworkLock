@@ -72,13 +72,13 @@ fun LockUi(reason: String, onList: () -> Unit, onHome: () -> Unit, onEmergency: 
     Box(Modifier.fillMaxSize().background(Color(0xFF141A33)).systemBarsPadding(), contentAlignment = Alignment.Center) {
         Column(Modifier.widthIn(max = 480.dp).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text(if (reason == "LIMIT") "Лимит времени на сегодня исчерпан" else "Сначала домашние задания",
+            Text(when (reason) { "LIMIT" -> "Лимит времени на сегодня исчерпан"; "NIGHT" -> "Ночной режим"; else -> "Сначала домашние задания" },
                 color = Color.White, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
-            Text(if (reason == "LIMIT") "Приложение снова будет доступно завтра." else "Выполни все задания — и приложения откроются.",
+            Text(when (reason) { "LIMIT" -> "Приложение снова будет доступно завтра."; "NIGHT" -> "Приложения недоступны с 23:00 до 06:00. Пора отдыхать."; else -> "Выполни все задания — и приложения откроются." },
                 color = Color(0xFFB0B8E0), textAlign = TextAlign.Center)
-            if (reason != "LIMIT") Button(onList, Modifier.fillMaxWidth()) { Text("Перейти к списку ДЗ") }
+            if (reason == "HOMEWORK") Button(onList, Modifier.fillMaxWidth()) { Text("Перейти к списку ДЗ") }
             OutlinedButton(onHome, Modifier.fillMaxWidth()) { Text("На главный экран", color = Color.White) }
-            if (reason != "LIMIT") {
+            if (reason == "HOMEWORK") {
                 if (available) {
                     Text("Экстренный доступ на 5 минут (1 раз в сутки). Удерживайте кнопку 10 секунд.",
                         color = Color(0xFFB0B8E0), textAlign = TextAlign.Center)

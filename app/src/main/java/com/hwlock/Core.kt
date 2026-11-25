@@ -16,11 +16,20 @@ import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings as AS
 import androidx.room.Room
-import androidx.work.*
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 
 class App : Application() {
@@ -41,6 +50,9 @@ object Graph {
     lateinit var ctx: Context; private set
     lateinit var db: Db; private set
     lateinit var prefs: Prefs; private set
+    /** Скоуп, не привязанный к экрану: сохранение выбора приложений не отменяется при уходе с экрана. */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun init(c: Context) {
         ctx = c.applicationContext
         db = Room.databaseBuilder(ctx, Db::class.java, "hw.db").build()
@@ -51,11 +63,14 @@ object Graph {
 // ---------- Ротация в полночь + очистка архива ----------
 object Rotation {
     suspend fun run() {
-        val dao = Graph.db.tasks()
-        dao.archiveOld(LocalDate.now().toString(), System.currentTimeMillis())
-        dao.purge(System.currentTimeMillis() - 7L * 24 * 3600_000)   // архив хранится 7 дней
-        val token = Graph.prefs.flow.first().meshToken
-        if (token.isNotEmpty()) Mesh.sync(token)
+        try {
+            val dao = Graph.db.tasks()
+            dao.archiveOld(LocalDate.now().toString(), System.currentTimeMillis())
+            dao.purge(System.currentTimeMillis() - 7L * 24 * 3600_000)   // архив хранится 7 дней
+            val token = Graph.prefs.flow.first().meshToken
+            if (token.isNotEmpty()) Mesh.sync(token)
+        } catch (_: Throwable) {
+        }
     }
 }
 
@@ -65,24 +80,37 @@ class DailyWorker(c: Context, p: WorkerParameters) : CoroutineWorker(c, p) {
 
 // ---------- Белый список ----------
 object Whitelist {
-    private val keywords = listOf("dialer", "contacts", "deskclock", "clock", "mms", "messaging", "camera",
-        "telecom", "incallui", "launcher", "systemui", "com.android.settings", "packageinstaller", "permissioncontroller")
+    private val keywords = listOf(
+        "com.android.dialer", "com.google.android.dialer", "incallui", "telecom",
+        "com.android.contacts", "com.google.android.contacts",
+        "deskclock", "com.android.mms", "com.google.android.apps.messaging",
+        "com.android.camera", "com.sec.android.app.camera",
+        "com.android.systemui", "com.android.settings", "packageinstaller", "permissioncontroller",
+        "com.android.launcher", "com.miui.home", "com.google.android.apps.nexuslauncher"
+    )
+    @Volatile private var cache: Set<String>? = null
+    @Volatile private var cacheAt = 0L
 
     fun set(ctx: Context): Set<String> {
+        val now = System.currentTimeMillis()
+        cache?.let { if (now - cacheAt < 60_000) return it }
         val pm = ctx.packageManager
         val s = mutableSetOf(ctx.packageName)
-        fun add(i: Intent) = pm.queryIntentActivities(i, 0).forEach { s += it.activityInfo.packageName }
+        fun add(i: Intent) {
+            try { pm.queryIntentActivities(i, 0).forEach { s += it.activityInfo.packageName } } catch (_: Throwable) {}
+        }
         add(Intent(Intent.ACTION_DIAL))
         add(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")))
         add(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
         add(Intent(MediaStore.ACTION_IMAGE_CAPTURE))
         add(Intent(Intent.ACTION_VIEW, ContactsContract.Contacts.CONTENT_URI))
         add(Intent(AlarmClock.ACTION_SHOW_ALARMS))
+        cache = s; cacheAt = now
         return s
     }
 
     fun isProtected(ctx: Context, pkg: String): Boolean =
-        pkg in set(ctx) || keywords.any { pkg.contains(it, true) }
+        pkg in set(ctx) || keywords.any { pkg.startsWith(it, true) || pkg.contains(it, true) }
 }
 
 // ---------- Учёт времени ----------
@@ -90,10 +118,11 @@ object Usage {
     fun usedToday(ctx: Context, pkg: String): Long {
         val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val now = System.currentTimeMillis()
-        val start = LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val ev = usm.queryEvents(start, now)
         val e = UsageEvents.Event()
-        var total = 0L; var from = 0L
+        var total = 0L
+        var from = 0L
         while (ev.hasNextEvent()) {
             ev.getNextEvent(e)
             if (e.packageName != pkg) continue
@@ -108,19 +137,27 @@ object Usage {
 }
 
 // ---------- Политика блокировки ----------
-enum class Verdict { ALLOW, HOMEWORK, LIMIT }
+enum class Verdict { ALLOW, HOMEWORK, LIMIT, NIGHT }
 
 object Policy {
     fun isFreeDay(s: Settings) = s.vacation || LocalDate.now().dayOfWeek.value in s.weekend
+
+    /** Ночной режим: с 23:00 до 06:00. */
+    fun isNight(): Boolean {
+        val h = LocalDateTime.now().hour
+        return h >= 23 || h < 6
+    }
 
     suspend fun homeworkLocked(): Boolean {
         val s = Graph.prefs.flow.first()
         return !isFreeDay(s) && Graph.db.tasks().pending() > 0 && s.emergencyUntil < System.currentTimeMillis()
     }
 
+    /** Каждый вызов читает актуальные данные из Room/DataStore — изменения списка применяются мгновенно. */
     suspend fun verdict(pkg: String): Verdict {
         if (Whitelist.isProtected(Graph.ctx, pkg)) return Verdict.ALLOW
         val app = Graph.db.apps().get(pkg) ?: return Verdict.ALLOW
+        if (isNight()) return Verdict.NIGHT
         val s = Graph.prefs.flow.first()
         if (s.emergencyUntil > System.currentTimeMillis()) return Verdict.ALLOW
         if (!isFreeDay(s) && Graph.db.tasks().pending() > 0) return Verdict.HOMEWORK
