@@ -58,6 +58,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -71,11 +72,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import java.time.LocalDate
 
@@ -217,13 +221,23 @@ fun MainScreen(vm: VM, onArchive: () -> Unit, onSettings: () -> Unit) {
     var adding by remember { mutableStateOf(false) }
     val done = tasks.count { t -> t.done }
     val progress by animateFloatAsState(if (tasks.isEmpty()) 1f else done.toFloat() / tasks.size, label = "p")
+    val nowTick = vm.now                       // чтение состояния → пересчёт при каждом refresh()
     val free = Policy.isFreeDay(set)
-    val night = Policy.isNight()
-    val locked = !free && tasks.any { t -> !t.done }
+    val night = nowTick > 0 && Policy.isNight()
+    val emergency = set.emergencyUntil > nowTick
+    val locked = !free && !emergency && tasks.any { t -> !t.done }
     val red = night || locked
 
-    LaunchedEffect(apps) {
-        while (true) { vm.refreshUsage(); delay(30_000) }
+    // 1) обновление при каждом разворачивании приложения
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) vm.refresh() }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+    // 2) таймер раз в 5 секунд, пока главный экран открыт
+    LaunchedEffect(Unit) {
+        while (true) { vm.refresh(); delay(5_000) }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding()) {

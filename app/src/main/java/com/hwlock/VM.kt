@@ -26,6 +26,13 @@ class VM(app: Application) : AndroidViewModel(app) {
     var installed by mutableStateOf<List<InstalledApp>>(emptyList())
     var used by mutableStateOf<Map<String, Long>>(emptyMap())
     var meshMsg by mutableStateOf("")
+    /** Метка времени для пересчёта статуса (23:00 / 06:00, смена дня) на главном экране. */
+    var now by mutableStateOf(System.currentTimeMillis())
+
+    fun refresh() {
+        now = System.currentTimeMillis()
+        refreshUsage()
+    }
 
     init { viewModelScope.launch(Dispatchers.IO) { Rotation.run() } }  // догоняющая ротация
 
@@ -48,10 +55,10 @@ class VM(app: Application) : AndroidViewModel(app) {
         used = selected.value.associate { it.pkg to runCatching { Usage.usedToday(c, it.pkg) }.getOrDefault(0L) }
     }
 
-    fun toggleApp(a: InstalledApp, on: Boolean) = viewModelScope.launch {
+    fun toggleApp(a: InstalledApp, on: Boolean) = Graph.scope.launch {
         if (on) db.apps().insert(AppEntity(a.pkg, a.label)) else db.apps().remove(a.pkg)
     }
-    fun setLimit(pkg: String, m: Int) = viewModelScope.launch { db.apps().setLimit(pkg, m) }
+    fun setLimit(pkg: String, m: Int) = Graph.scope.launch { db.apps().setLimit(pkg, m) }
 
     fun saveProfile(n: String, e: String) = viewModelScope.launch { Graph.prefs.setProfile(n, e) }
     fun finishOnboarding() = viewModelScope.launch { Graph.prefs.setOnboarded() }

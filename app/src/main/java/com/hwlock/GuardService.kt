@@ -1,9 +1,13 @@
 package com.hwlock
 
 import android.accessibilityservice.AccessibilityService
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
+import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -23,7 +27,7 @@ class GuardService : AccessibilityService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + handler)
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var current = ""
-    @Volatile private var lastLock = 0L
+    @Volatile private var lastLock = 0L          // только короткий кулдаун, пакет НЕ запоминается
     private var loop: Job? = null
 
     private val settingsPkgs = setOf(
@@ -40,10 +44,18 @@ class GuardService : AccessibilityService() {
         try {
             super.onServiceConnected()
             loop?.cancel()
-            loop = scope.launch {                 // периодическая проверка таймеров
+            // Непрерывный тикер: каждые 2 с, пока экран включён, проверяем активное приложение.
+            loop = scope.launch {
                 while (isActive) {
-                    delay(3000)
-                    safeCheck(current)
+                    delay(2000)
+                    try {
+                        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                        if (!pm.isInteractive) continue
+                        val p = foregroundPackage()
+                        if (!p.isNullOrEmpty()) safeCheck(p)
+                    } catch (t: Throwable) {
+                        Log.e(tag, "ticker", t)
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -51,12 +63,39 @@ class GuardService : AccessibilityService() {
         }
     }
 
+    private fun ignored(p: String) = p.contains("inputmethod") || p == "com.android.systemui"
+
+    /** rootInActiveWindow → UsageStats за последние 5 секунд → последнее известное окно. */
+    private fun foregroundPackage(): String? {
+        val root = try { rootInActiveWindow?.packageName?.toString() } catch (t: Throwable) { null }
+        if (!root.isNullOrEmpty() && !ignored(root)) return root
+        val usage = recentUsagePackage()
+        if (!usage.isNullOrEmpty() && !ignored(usage)) return usage
+        return current.ifEmpty { null }
+    }
+
+    private fun recentUsagePackage(): String? {
+        return try {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val ev = usm.queryEvents(now - 5000, now)
+            val e = UsageEvents.Event()
+            var last: String? = null
+            while (ev.hasNextEvent()) {
+                ev.getNextEvent(e)
+                if (e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) last = e.packageName
+            }
+            last
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {
         try {
             if (e == null || e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
             val pkg = e.packageName?.toString()
-            if (pkg.isNullOrEmpty()) return
-            if (pkg.contains("inputmethod") || pkg == "com.android.systemui") return
+            if (pkg.isNullOrEmpty() || ignored(pkg)) return
             current = pkg
             scope.launch {
                 try {
@@ -77,7 +116,7 @@ class GuardService : AccessibilityService() {
         val hit = sensitive.any {
             try { root.findAccessibilityNodeInfosByText(it).isNotEmpty() } catch (t: Throwable) { false }
         }
-        if (hit) main.post { runCatching { performGlobalAction(GLOBAL_ACTION_HOME) } }
+        if (hit) main.post { try { performGlobalAction(GLOBAL_ACTION_HOME) } catch (_: Throwable) {} }
     }
 
     private suspend fun safeCheck(pkg: String) {
@@ -86,9 +125,8 @@ class GuardService : AccessibilityService() {
             val v = Policy.verdict(pkg)
             if (v == Verdict.ALLOW) return
             val now = System.currentTimeMillis()
-            if (now - lastLock < 1500) return
+            if (now - lastLock < 1500) return    // кулдаун 1.5 с вместо запоминания пакета
             lastLock = now
-            current = packageName
             main.post {
                 try {
                     val i = Intent(applicationContext, LockActivity::class.java)

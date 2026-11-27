@@ -50,6 +50,13 @@ class LockActivity : ComponentActivity() {
         }
     }
 
+    /** Как только экран-блокировщик уходит на задний план — закрываем его, чтобы при следующем
+     *  возврате в игру (в т.ч. из «Недавних») он открывался заново. */
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) finish()
+    }
+
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); read(intent) }
     private fun read(i: Intent) { reason = i.getStringExtra("reason") ?: "HOMEWORK"; pkg = i.getStringExtra("pkg") ?: "" }
     private fun home() {
